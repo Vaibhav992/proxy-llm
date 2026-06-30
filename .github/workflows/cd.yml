@@ -1,0 +1,57 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: llm-proxy
+  REGISTRY: registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run tests
+        run: ./mvnw clean verify -B
+
+      - name: Build Docker image
+        run: |
+          docker build -t $REGISTRY/$IMAGE_NAME:${{ github.sha }} .
+          docker tag $REGISTRY/$IMAGE_NAME:${{ github.sha }} $REGISTRY/$IMAGE_NAME:latest
+
+      - name: Login to DOCR
+        run: echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u "${{ secrets.DOCR_TOKEN }}" --password-stdin
+
+      - name: Push to DOCR
+        run: |
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $REGISTRY/$IMAGE_NAME:latest
+
+      - name: Deploy to Droplet
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          password: ${{ secrets.DROPLET_PASSWORD }}
+          script: |
+            echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u "${{ secrets.DOCR_TOKEN }}" --password-stdin
+            docker pull registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}/llm-proxy:latest
+            docker stop llm-proxy 2>/dev/null || true
+            docker rm llm-proxy 2>/dev/null || true
+            docker run -d \
+              --name llm-proxy \
+              --restart unless-stopped \
+              --env-file /opt/llm-proxy/.env \
+              -p 8080:8080 \
+              registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}/llm-proxy:latest
+            docker image prune -f

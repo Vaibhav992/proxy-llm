@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: llm-proxy
+  config:
+    import: optional:file:.env[.properties]
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:prod}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+llm:
+  primary-url: ${PRIMARY_LLM_URL:http://localhost:8080/mock/primary}
+  candidate-url: ${CANDIDATE_LLM_URL:http://localhost:8080/mock/candidate}
+  primary-timeout: ${PRIMARY_LLM_TIMEOUT:10s}
+  candidate-timeout: ${CANDIDATE_LLM_TIMEOUT:30s}
+  mock:
+    enabled: ${MOCK_LLM_ENABLED:false}
+    primary-delay: ${MOCK_PRIMARY_DELAY_MS:0}ms
+    candidate-delay: ${MOCK_CANDIDATE_DELAY_MS:0}ms
+    candidate-mismatch: ${MOCK_CANDIDATE_MISMATCH:false}
