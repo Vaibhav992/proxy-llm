@@ -1,4 +1,4 @@
-name: Pipeline
+name: CI/CD
 
 on:
   push:
@@ -7,74 +7,114 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "21"
+  IMAGE_NAME: llm-proxy
+
 jobs:
   test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
           cache: maven
 
-      - name: Make mvnw executable
-        run: chmod +x mvnw
-
       - name: Run tests
-        run: ./mvnw clean verify -B
+        run: |
+          chmod +x mvnw
+          ./mvnw -B verify
 
   deploy:
+    name: Build & Deploy
     needs: test
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    env:
-      IMAGE_NAME: llm-proxy
-      REGISTRY: registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Validate deploy secrets
+        run: |
+          missing=0
+          for name in DOCR_TOKEN DOCR_REGISTRY DROPLET_HOST DROPLET_USER DROPLET_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+        env:
+          DOCR_TOKEN: ${{ secrets.DOCR_TOKEN }}
+          DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
+          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+          DROPLET_USER: ${{ secrets.DROPLET_USER }}
+          DROPLET_PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
         with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: maven
+          token: ${{ secrets.DOCR_TOKEN }}
 
-      - name: Make mvnw executable
-        run: chmod +x mvnw
+      - name: Log in to Container Registry
+        run: doctl registry login
 
-      - name: Run tests
-        run: ./mvnw clean verify -B
-
-      - name: Build Docker image
+      - name: Build and push Docker image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $REGISTRY/$IMAGE_NAME:${{ github.sha }} .
-          docker tag $REGISTRY/$IMAGE_NAME:${{ github.sha }} $REGISTRY/$IMAGE_NAME:latest
-
-      - name: Login to DOCR
-        run: echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u "${{ secrets.DOCR_TOKEN }}" --password-stdin
-
-      - name: Push to DOCR
-        run: |
-          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
-          docker push $REGISTRY/$IMAGE_NAME:latest
+          IMAGE="registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          docker build -t "${IMAGE}:${IMAGE_TAG}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${IMAGE_TAG}"
+          docker push "${IMAGE}:latest"
 
       - name: Deploy to Droplet
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          DOCR_TOKEN: ${{ secrets.DOCR_TOKEN }}
+          DOCR_REGISTRY: ${{ secrets.DOCR_REGISTRY }}
+          IMAGE_TAG: ${{ github.sha }}
         with:
           host: ${{ secrets.DROPLET_HOST }}
           username: ${{ secrets.DROPLET_USER }}
           password: ${{ secrets.DROPLET_PASSWORD }}
+          envs: DOCR_TOKEN,DOCR_REGISTRY,IMAGE_TAG
           script: |
-            echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u "${{ secrets.DOCR_TOKEN }}" --password-stdin
-            docker pull registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}/llm-proxy:latest
-            docker stop llm-proxy 2>/dev/null || true
-            docker rm llm-proxy 2>/dev/null || true
+            set -euo pipefail
+            CONTAINER_NAME="llm-proxy"
+            ENV_FILE="/opt/llm-proxy/.env"
+            IMAGE="registry.digitalocean.com/${DOCR_REGISTRY}/llm-proxy:${IMAGE_TAG}"
+
+            echo "${DOCR_TOKEN}" | docker login registry.digitalocean.com -u "${DOCR_TOKEN}" --password-stdin
+            docker pull "${IMAGE}"
+            docker tag "${IMAGE}" "registry.digitalocean.com/${DOCR_REGISTRY}/llm-proxy:latest"
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm "${CONTAINER_NAME}" 2>/dev/null || true
             docker run -d \
-              --name llm-proxy \
+              --name "${CONTAINER_NAME}" \
               --restart unless-stopped \
-              --env-file /opt/llm-proxy/.env \
               -p 8080:8080 \
-              registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}/llm-proxy:latest
-            docker image prune -f
+              --env-file "${ENV_FILE}" \
+              "${IMAGE}"
+
+            for i in $(seq 1 45); do
+              if curl -sf http://localhost:8080/metrics > /dev/null; then
+                echo "Deploy successful — /metrics responded."
+                docker image prune -f
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "Health check failed. Container logs:"
+            docker logs "${CONTAINER_NAME}" --tail 50
+            exit 1
