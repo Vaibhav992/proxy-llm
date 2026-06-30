@@ -89,8 +89,7 @@ Images push to: `registry.digitalocean.com/llm-proxy-server/llm-proxy`
 | `DROPLET_USER` | `root` |
 | `DROPLET_PASSWORD` | Droplet password |
 
-- **CI** (`ci.yml`): runs `mvn verify` on push/PR
-- **CD** (`cd.yml`): test → Docker build → push DOCR → SSH deploy to droplet
+- **Pipeline** (`.github/workflows/pipeline.yml`): `test` job on every push/PR; `deploy` job on `main` only (after tests pass)
 
 ## Tech stack
 

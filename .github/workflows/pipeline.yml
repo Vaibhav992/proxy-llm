@@ -1,16 +1,14 @@
-name: CD
+name: Pipeline
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
-env:
-  IMAGE_NAME: llm-proxy
-  REGISTRY: registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}
-
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +18,31 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
           cache: maven
+
+      - name: Make mvnw executable
+        run: chmod +x mvnw
+
+      - name: Run tests
+        run: ./mvnw clean verify -B
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: llm-proxy
+      REGISTRY: registry.digitalocean.com/${{ secrets.DOCR_REGISTRY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Make mvnw executable
+        run: chmod +x mvnw
 
       - name: Run tests
         run: ./mvnw clean verify -B
